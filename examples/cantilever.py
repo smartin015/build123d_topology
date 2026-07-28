@@ -34,15 +34,14 @@ def main():
 
     build = bd.Box(LENGTH, HEIGHT, WIDTH)
 
+    # Select faces for boundary conditions via build123d's selector API
+    left_face = build.faces().sort_by(bd.Axis.X).first
+    right_face = build.faces().sort_by(bd.Axis.X).last
+
     result = optimize(
         build,
-        fixed=["left"],
-        loads=[dict(
-            center=(LENGTH / 2, 0, -WIDTH / 2),
-            normal=(0, 0, -1),
-            force=(0, 0, -10),
-            radius=LENGTH * 0.55,
-        )],
+        fixed=[left_face],
+        loads=[(right_face, (0, 0, -10))],
         resolution=RESOLUTION,
         volfrac=VOLFRAC,
         max_iter=MAX_ITER,

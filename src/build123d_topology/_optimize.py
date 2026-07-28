@@ -59,42 +59,80 @@ class _BC:
         self.force = np.asarray(force, dtype=float) if force is not None else None
 
 
-def _resolve_region(mesh: trimesh.Trimesh, node_coords, region: dict):
-    """Turn a user-friendly region dict into a node mask.
 
-    Supported keys
-    ---------------
-    center : (3,) float
-        World-space centre of the region.
-    normal : (3,) float
-        Direction: nodes on faces whose normal points in this direction
-        are selected.  Also used as the force direction for loads.
-    radius : float
-        Max distance from *center* (mm).  Nodes beyond this are excluded.
-    angle : float
-        Max angle (degrees) between a node-to-center vector and the
-        *opposite* of *normal*.  Default 90 (half-space).
+
+
+def _resolve_region(mesh, node_coords, region, vsize=1.0):
+    """Turn a region spec into a node-index array.
+
+    *region* can be:
+
+    - ``dict`` — ``center``, ``normal``, ``radius``, ``angle`` keys.
+    - a build123d ``Face`` — nodes near that face plane are selected.
+    - a build123d ``Solid`` / ``Compound`` — nodes whose coordinates fall
+      inside the tessellated shape are selected (volumetric region).
+    - a ``trimesh.Trimesh`` — same as Solid: nodes inside the mesh.
     """
-    center = np.asarray(region["center"], dtype=float)
-    normal = np.asarray(region.get("normal", (1, 0, 0)), dtype=float)
-    normal = normal / np.linalg.norm(normal)
-    radius = float(region.get("radius", np.inf))
-    angle = np.radians(float(region.get("angle", 90)))
+    # -- dict path ------------------------------------------------------
+    if isinstance(region, dict):
+        center = np.asarray(region["center"], dtype=float)
+        normal = np.asarray(region.get("normal", (1, 0, 0)), dtype=float)
+        normal = normal / np.linalg.norm(normal)
+        radius = float(region.get("radius", np.inf))
+        angle = np.radians(float(region.get("angle", 90)))
 
-    vec = node_coords - center
-    dist = np.linalg.norm(vec, axis=1)
+        vec = node_coords - center
+        dist = np.linalg.norm(vec, axis=1)
+        dot = np.dot(vec, -normal) / np.maximum(dist, 1e-9)
+        mask = (dist <= radius) & (dot >= np.cos(angle))
+        return np.where(mask)[0]
 
-    # Cosine similarity with the *reverse* of normal (points "into" the face)
-    dot = np.dot(vec, -normal) / np.maximum(dist, 1e-9)
+    # -- build123d Face / Solid / trimesh --------------------------------
+    if isinstance(region, str):
+        raise TypeError(f"String regions must be resolved before "
+                        f"_resolve_region (got {region!r})")
 
-    mask = (dist <= radius) & (dot >= np.cos(angle))
-    return np.where(mask)[0]
+    reg_mesh = _to_trimesh(region)
+
+    # Heuristic: a Face tessellates to a flat-ish patch (few vertices,
+    # nearly coplanar -> small bounding-box thickness vs extent).
+    # A Solid tessellates to a closed volume.
+    bbox = reg_mesh.bounds
+    ext = bbox[1] - bbox[0]
+    is_flat = (np.min(ext) < 0.05 * np.max(ext)) and len(reg_mesh.vertices) < 200
+
+    if is_flat:
+        center = reg_mesh.vertices.mean(axis=0)
+        normal = reg_mesh.face_normals[0]
+        radius = float(np.max(np.linalg.norm(
+            reg_mesh.vertices - center, axis=1)))
+        radius += vsize * 0.75
+
+        vec = node_coords - center
+        dist = np.linalg.norm(vec, axis=1)
+        dot = np.dot(vec, -normal) / np.maximum(dist, 1e-9)
+        mask = (dist <= radius) & (dot >= 0.0)
+        return np.where(mask)[0]
+
+    # Volumetric region: nodes inside the closed mesh.
+    inside = reg_mesh.contains(node_coords)
+    return np.where(inside)[0]
 
 
 def _build_boundary_conditions(mesh, node_coords, vsize,
-                                fixed: Sequence[dict],
-                                loads: Sequence[dict]):
+                                fixed: Sequence,
+                                loads: Sequence):
     """Convert user BC specs into fixed_dofs array and force vector.
+
+    Each element of *fixed* can be:
+      - ``str`` — bookmark ("left", "right", …)
+      - ``dict`` — ``center``, ``normal``, ``radius``, ``angle``, ``fix_x/y/z``
+      - a build123d ``Face``, ``Solid``, or ``trimesh.Trimesh``
+
+    Each element of *loads* can be:
+      - ``str`` — bookmark
+      - ``dict`` — as above plus ``force`` vector
+      - ``(region, force_vector)`` tuple — e.g. ``(face, (0, 0, -10))``
 
     Returns
     -------
@@ -105,20 +143,27 @@ def _build_boundary_conditions(mesh, node_coords, vsize,
     fixed_dofs = []
     force = np.zeros(ndof)
 
-    # Bookmarks let the user write ``fixed=["left", "right", …]``.
     BOOKMARKS = _face_bookmarks(mesh.bounds)
 
-    for spec in fixed:
+    def _normalise(spec):
+        """Resolve str bookmarks, return a dict or a non-str object."""
         if isinstance(spec, str):
-            spec = BOOKMARKS.get(spec, {})
-            if not spec:
+            d = BOOKMARKS.get(spec)
+            if d is None:
                 raise ValueError(
                     f"Unknown bookmark '{spec}'. "
                     f"Known: {list(BOOKMARKS)}")
-        nodes = _resolve_region(mesh, node_coords, spec)
-        fix_x = bool(spec.get("fix_x", True))
-        fix_y = bool(spec.get("fix_y", True))
-        fix_z = bool(spec.get("fix_z", True))
+            return d
+        return spec
+
+    for spec in fixed:
+        spec = _normalise(spec)
+        fix_x = fix_y = fix_z = True
+        if isinstance(spec, dict):
+            fix_x = bool(spec.get("fix_x", True))
+            fix_y = bool(spec.get("fix_y", True))
+            fix_z = bool(spec.get("fix_z", True))
+        nodes = _resolve_region(mesh, node_coords, spec, vsize)
         for nid in nodes:
             if fix_x:
                 fixed_dofs.append(3 * nid)
@@ -127,15 +172,17 @@ def _build_boundary_conditions(mesh, node_coords, vsize,
             if fix_z:
                 fixed_dofs.append(3 * nid + 2)
 
-    for spec in loads:
-        if isinstance(spec, str):
-            spec = BOOKMARKS.get(spec, {})
-            if not spec:
-                raise ValueError(
-                    f"Unknown bookmark '{spec}'. "
-                    f"Known: {list(BOOKMARKS)}")
-        nodes = _resolve_region(mesh, node_coords, spec)
-        fvec = np.asarray(spec.get("force", (0, 0, -1)), dtype=float)
+    for item in loads:
+        # Support (region, force_vector) tuples
+        if isinstance(item, tuple) and len(item) == 2:
+            spec, fvec = item
+            spec = _normalise(spec)
+        else:
+            spec = _normalise(item)
+            fvec = spec.get("force", (0, 0, -1)) if isinstance(spec, dict) else (0, 0, -1)
+
+        nodes = _resolve_region(mesh, node_coords, spec, vsize)
+        fvec = np.asarray(fvec, dtype=float)
         if len(nodes):
             f_per_node = fvec / len(nodes)
             for nid in nodes:
