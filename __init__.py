@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """
-topology_gen — SIMP topology optimization for build123d.
+build123d_topology — SIMP topology optimisation for build123d.
 
 Thin wrapper around the blendtopo pure-numpy core that replaces Blender's
-BVH voxelizer with trimesh, so the optimizer runs headless in any Python
+BVH voxeliser with trimesh, so the optimiser runs headless in any Python
 process (no bpy needed).
 
 Typical usage::
 
     import trimesh
-    from topology_gen import optimize
+    from build123d_topology import optimize
 
     build = trimesh.creation.box((60, 20, 10))
     result = optimize(
@@ -20,7 +20,7 @@ Typical usage::
         volfrac=0.3,
         max_iter=40,
     )
-    result.export_stl("optimized.stl")
+    result.export_stl("optimised.stl")
     # result.mesh is a trimesh.Trimesh ready for build123d
 """
 
