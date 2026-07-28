@@ -14,6 +14,34 @@ from ._voxelize import voxelize
 from ._result import Result
 
 
+def _to_trimesh(obj) -> trimesh.Trimesh:
+    """Convert a build123d shape (or trimesh) to a trimesh.Trimesh.
+
+    Accepts anything with a ``tessellate()`` method (build123d shapes,
+    Compounds, etc.) or an existing trimesh.Thimesh passed through as-is.
+    """
+    if isinstance(obj, trimesh.Trimesh):
+        return obj
+
+    tess = getattr(obj, "tessellate", None)
+    if tess is None:
+        raise TypeError(
+            f"Expected a trimesh.Trimesh or an object with a tessellate() "
+            f"method (e.g. a build123d Solid), got {type(obj).__name__}")
+
+    verts_raw, faces_raw = tess(0.5)
+    # build123d tessellate returns Vector objects; coerce to plain float
+    # arrays.  Also handles plain numpy arrays / lists.
+    try:
+        verts = np.array([[float(v.X), float(v.Y), float(v.Z)]
+                          for v in verts_raw], dtype=np.float64)
+    except (TypeError, AttributeError):
+        verts = np.asarray(verts_raw, dtype=np.float64)
+    faces = np.asarray(faces_raw, dtype=np.int64)
+
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
@@ -151,8 +179,8 @@ def _face_bookmarks(bounds):
 class Optimizer:
     """Thin stateful wrapper so you can tweak parameters between runs."""
 
-    def __init__(self, build_mesh: trimesh.Trimesh, **kwargs):
-        self.build_mesh = build_mesh
+    def __init__(self, build_mesh, **kwargs):
+        self.build_mesh = _to_trimesh(build_mesh)
         self.kwargs = kwargs
         self._last_result: Result | None = None
 
@@ -167,11 +195,11 @@ class Optimizer:
 
 
 def optimize(
-    build_mesh: trimesh.Trimesh,
+    build_mesh,
     *,
     fixed: Sequence[dict | str] = (),
     loads: Sequence[dict | str] = (),
-    exclude: Sequence[trimesh.Trimesh] = (),
+    exclude: Sequence = (),
     resolution: int = 60,
     volfrac: float = 0.3,
     max_iter: int = 40,
@@ -185,8 +213,10 @@ def optimize(
 
     Parameters
     ----------
-    build_mesh : trimesh.Trimesh
-        Closed mesh defining the design space.
+    build_mesh : trimesh.Trimesh or build123d Shape
+        The design space.  Accepts a ``trimesh.Trimesh``, any build123d
+        ``Solid`` / ``Compound`` / ``Part`` (anything with a
+        ``tessellate()`` method), or a plain ``(vertices, faces)`` tuple.
     fixed : list of dict or str
         Where the part is clamped.  Each entry is either a region dict
         (``center``, ``normal``, ``radius``, ``angle``) or a bookmark
@@ -196,8 +226,10 @@ def optimize(
         Where external forces act.  Region dicts also need a ``force``
         key ``(fx, fy, fz)``.  The total force is spread evenly across
         all selected nodes.
-    exclude : list of trimesh.Trimesh
+    exclude : list
         Keep-out regions; voxels inside these are forced empty.
+        Each item is converted via ``_to_trimesh()`` (trimesh, build123d
+        shape, or ``(verts, faces)`` tuple accepted).
     resolution : int
         Voxels along the longest axis of *build_mesh*.
     volfrac : float
@@ -219,6 +251,10 @@ def optimize(
     -------
     Result
     """
+    # ---- normalise input ------------------------------------------------
+    build_mesh = _to_trimesh(build_mesh)
+    exclude = [_to_trimesh(e) for e in exclude]
+
     # ---- voxelise --------------------------------------------------------
     if verbose:
         print(f"Voxelising build space (resolution={resolution}) …")

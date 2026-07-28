@@ -48,11 +48,11 @@ python -c "from build123d_topology import optimize; print('OK')"
 ## Quick start
 
 ```python
-import trimesh
+import build123d as bd
 from build123d_topology import optimize
 
 # Build space: a 60×20×10 mm beam
-build = trimesh.creation.box((60, 20, 10))
+build = bd.Box(60, 20, 10)
 
 result = optimize(
     build,
@@ -83,10 +83,10 @@ Main entry point.  Returns a `Result`.
 
 | Parameter    | Type                  | Default  | Notes |
 |-------------|-----------------------|----------|-------|
-| `build_mesh`| `trimesh.Trimesh`     | —        | Closed mesh defining the design space. |
+| `build_mesh`| `Solid \| Compound \| trimesh.Trimesh` | — | Design space (anything with ``tessellate()``). |
 | `fixed`     | `list[dict | str]`    | `()`     | Where the part is clamped (see below). |
 | `loads`     | `list[dict | str]`    | `()`     | Where external forces act. |
-| `exclude`   | `list[trimesh.Trimesh]`|`()`     | Keep-out regions; voxels inside are forced empty. |
+| `exclude`   | `list[Solid | trimesh.Trimesh]` |`()`  | Keep-out regions; voxels inside are forced empty. |
 | `resolution`| `int`                 | `60`     | Voxels along the longest axis of the build mesh. |
 | `volfrac`   | `float`               | `0.3`    | Target volume fraction (0–1). |
 | `max_iter`  | `int`                 | `40`     | Maximum SIMP iterations. |

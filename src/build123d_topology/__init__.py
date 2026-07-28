@@ -8,10 +8,10 @@ process (no bpy needed).
 
 Typical usage::
 
-    import trimesh
+    import build123d as bd
     from build123d_topology import optimize
 
-    build = trimesh.creation.box((60, 20, 10))
+    build = bd.Box(60, 20, 10)
     result = optimize(
         build,
         fixed=[dict(center=(-30, 0, 0), normal=(-1, 0, 0), radius=3)],
