@@ -32,22 +32,18 @@ Optionally, install build123d itself if you want to use
 pip install build123d
 ```
 
-### 3. Make the package importable
-
-Either install it in development mode:
+### 3. Install the package
 
 ```bash
 pip install -e .
 ```
 
-Or just add the parent directory to `PYTHONPATH`:
+That's it — `pip install -e .` registers the package and installs its
+dependencies.  Verify with:
 
 ```bash
-export PYTHONPATH="/path/to/parent:$PYTHONPATH"
+python -c "from build123d_topology import optimize; print('OK')"
 ```
-
-The parent directory is the one *containing* `build123d_topology/` —
-not the package directory itself.
 
 ## Quick start
 
