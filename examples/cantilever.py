@@ -11,6 +11,10 @@ Run from the repo root::
 
     pip install -e .
     python examples/cantilever.py
+
+The result is also pushed to the OCP CAD Viewer in VSCode via ``show()``
+(requires ``ocp-vscode`` to be installed — it is part of the standard
+build123d toolchain).
 """
 
 import trimesh
@@ -50,6 +54,18 @@ def main():
 
     result.export_stl("cantilever_optimised.stl")
     print("Wrote cantilever_optimised.stl")
+
+    # Push the result to the OCP CAD Viewer in VSCode.
+    # Falls back gracefully when the viewer isn't running.
+    try:
+        from ocp_vscode import show
+        show(result.mesh, name="cantilever_optimised")
+        print("Sent to OCP CAD Viewer")
+    except ImportError:
+        print("ocp-vscode not installed — skipping viewer")
+    except Exception as exc:
+        print(f"Viewer unavailable: {exc}")
+
     return 0
 
 
