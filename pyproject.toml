@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "build123d_topology"
+version = "0.1.0"
+description = "SIMP topology optimisation for build123d"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "trimesh>=4.0",
+    "rtree>=1.0",
+    "threadpoolctl>=3.0",
+]
+
+[project.optional-dependencies]
+build123d = ["build123d"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
