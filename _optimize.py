@@ -270,12 +270,12 @@ def optimize(
 
     # ---- run SIMP --------------------------------------------------------
     if verbose:
-        print(f"\n{'─'*55}")
-        print(f"  SIMP │ volfrac={volfrac}  penalty={penalty}  "
+        print(f"\n{'='*55}")
+        print(f"  SIMP | volfrac={volfrac}  penalty={penalty}  "
               f"max_iter={max_iter}")
-        print(f"{'─'*55}")
+        print(f"{'='*55}")
         print(f"  {'Iter':>4s}  {'compliance':>12s}  {'change':>8s}")
-        print(f"  {'─'*4s}  {'─'*12s}  {'─'*8s}")
+        print(f"  {'-'*4}  {'-'*12}  {'-'*8}")
 
     prob = _SIMProblem(
         nx, ny, nz,
@@ -306,8 +306,8 @@ def optimize(
 
     # ---- extract surface -------------------------------------------------
     if verbose:
-        print(f"\n{'─'*55}")
-        print("Extracting surface …")
+        print(f"\n{'='*55}")
+        print("Extracting surface ...")
 
     rho3d = best_rho.reshape(nx, ny, nz)
 
