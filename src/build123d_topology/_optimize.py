@@ -442,7 +442,11 @@ def optimize(
 
     # ---- filter radius ---------------------------------------------------
     if rmin is None:
-        rmin = max(1.5, min(nx, ny, nz) / 12.0)
+        # ~8% of the shortest dimension, at least 2.5 elements.
+        # Smaller values produce checkerboarded/gray designs that don't
+        # binarize; larger values produce simpler (but possibly over-smoothed)
+        # topologies.
+        rmin = max(2.5, min(nx, ny, nz) / 4.0)
     if verbose:
         print(f"  Filter radius: {rmin:.2f} voxels")
 

@@ -23,7 +23,7 @@ from ocp_vscode import show
 LENGTH, HEIGHT, WIDTH = 60, 20, 10  # mm
 RESOLUTION = 60
 VOLFRAC = 0.3
-MAX_ITER = 10
+MAX_ITER = 40  # ~40 iterations needed for convergence at this resolution
 
 print("=" * 60)
 print("Cantilever beam topology optimisation")
