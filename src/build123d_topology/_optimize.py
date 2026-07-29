@@ -18,7 +18,7 @@ def _to_trimesh(obj) -> trimesh.Trimesh:
     """Convert a build123d shape (or trimesh) to a trimesh.Trimesh.
 
     Accepts anything with a ``tessellate()`` method (build123d shapes,
-    Compounds, etc.) or an existing trimesh.Thimesh passed through as-is.
+    Compounds, etc.) or an existing trimesh.Trimesh passed through as-is.
     """
     if isinstance(obj, trimesh.Trimesh):
         return obj
@@ -30,8 +30,6 @@ def _to_trimesh(obj) -> trimesh.Trimesh:
             f"method (e.g. a build123d Solid), got {type(obj).__name__}")
 
     verts_raw, faces_raw = tess(0.5)
-    # build123d tessellate returns Vector objects; coerce to plain float
-    # arrays.  Also handles plain numpy arrays / lists.
     try:
         verts = np.array([[float(v.X), float(v.Y), float(v.Z)]
                           for v in verts_raw], dtype=np.float64)
@@ -57,9 +55,6 @@ class _BC:
         self.fix_y = fix_y
         self.fix_z = fix_z
         self.force = np.asarray(force, dtype=float) if force is not None else None
-
-
-
 
 
 def _resolve_region(mesh, node_coords, region, vsize=1.0):
@@ -96,7 +91,6 @@ def _resolve_region(mesh, node_coords, region, vsize=1.0):
 
     # Heuristic: a Face tessellates to a flat-ish patch (few vertices,
     # nearly coplanar -> small bounding-box thickness vs extent).
-    # A Solid tessellates to a closed volume.
     bbox = reg_mesh.bounds
     ext = bbox[1] - bbox[0]
     is_flat = (np.min(ext) < 0.05 * np.max(ext)) and len(reg_mesh.vertices) < 200
@@ -119,25 +113,132 @@ def _resolve_region(mesh, node_coords, region, vsize=1.0):
     return np.where(inside)[0]
 
 
+def _compute_passive_solid(nx, ny, nz, active, fixed_specs, loads_specs,
+                           bounds):
+    """Compute passive-solid element mask for BC anchor regions.
+
+    Returns a bool array of length nx*ny*nz where True elements are forced
+    to density 1.0 (non-design).
+
+    For bookmark strings, we directly mark the outermost layer of elements
+    on the corresponding AABB face.  For Face/Solid/trimesh objects we
+    defer to BC-node-based marking, which is precise for those types.
+    """
+    passive = np.zeros(nx * ny * nz, dtype=bool)
+
+    # Bookmarks map to exact element face layers
+    BOOKMARK_FACES = {
+        "left":   ("ex", 0),
+        "right":  ("ex", nx - 1),
+        "front":  ("ey", 0),
+        "back":   ("ey", ny - 1),
+        "bottom": ("ez", 0),
+        "top":    ("ez", nz - 1),
+    }
+
+    # Collect node coords for Face/Solid-based passive marking
+    nxp, nyp, nzp = nx + 1, ny + 1, nz + 1
+    n_nodes = nxp * nyp * nzp
+    n_ids = np.arange(n_nodes)
+    ix_arr = n_ids % nxp
+    iy_arr = (n_ids // nxp) % nyp
+    iz_arr = n_ids // (nxp * nyp)
+
+    bmin = np.asarray(bounds[0])
+    bmax = np.asarray(bounds[1])
+    ext = bmax - bmin
+    vsize = float(np.max(ext)) / max(nx, ny, nz, 1)  # approximate
+    origin = bmin
+    node_coords = np.stack([ix_arr, iy_arr, iz_arr], axis=1).astype(float) * vsize + origin
+
+    bc_node_set = set()
+
+    all_specs = [(s, False) for s in fixed_specs] + [(s, True) for s in loads_specs]
+
+    for raw_spec, _is_load in all_specs:
+        if isinstance(raw_spec, tuple) and len(raw_spec) == 2:
+            spec, force_vec = raw_spec
+        else:
+            spec = raw_spec
+
+        if isinstance(spec, str):
+            # Bookmark: mark the exact face layer
+            if spec in BOOKMARK_FACES:
+                axis, layer = BOOKMARK_FACES[spec]
+                if axis == "ex":
+                    passive.reshape(nx, ny, nz, order='F')[layer, :, :] = True
+                elif axis == "ey":
+                    passive.reshape(nx, ny, nz, order='F')[:, layer, :] = True
+                else:
+                    passive.reshape(nx, ny, nz, order='F')[:, :, layer] = True
+            continue
+
+        # For non-bookmark regions (Face, Solid, trimesh, dict), use
+        # the node-based approach: mark elements adjacent to BC nodes
+        # that are on the boundary of the active region.
+        nodes = _resolve_region(None, node_coords, spec, vsize)
+        bc_node_set.update(nodes.tolist())
+
+    # Node-based passive marking for non-bookmark regions
+    if bc_node_set:
+        _mark_elements_from_nodes(passive, bc_node_set, nx, ny, nz, active)
+
+    # Only mark active elements
+    passive = passive & active.astype(bool)
+    return passive
+
+
+def _mark_elements_from_nodes(passive, bc_nodes, nx, ny, nz, active):
+    """Mark elements adjacent to bc_nodes, restricted to the boundary of
+    the active region.  Modifies *passive* in place."""
+    nxp = nx + 1
+    nyp = ny + 1
+    area = nxp * nyp
+    active3d = active.reshape(nx, ny, nz, order='F')
+
+    # Precompute boundary mask: element is on boundary if any 6-neighbour
+    # is outside the active region.
+    boundary = np.zeros((nx, ny, nz), dtype=bool)
+    for axis in range(3):
+        nbr_lo = np.roll(active3d, 1, axis=axis)
+        nbr_hi = np.roll(active3d, -1, axis=axis)
+        if axis == 0:
+            nbr_lo[0, :, :] = False
+            nbr_hi[-1, :, :] = False
+        elif axis == 1:
+            nbr_lo[:, 0, :] = False
+            nbr_hi[:, -1, :] = False
+        else:
+            nbr_lo[:, :, 0] = False
+            nbr_hi[:, :, -1] = False
+        boundary |= active3d & (~nbr_lo | ~nbr_hi)
+
+    for nid in bc_nodes:
+        iz = nid // area
+        rem = nid % area
+        iy = rem // nxp
+        ix = rem % nxp
+
+        for ez in (iz - 1, iz):
+            if ez < 0 or ez >= nz:
+                continue
+            for ey in (iy - 1, iy):
+                if ey < 0 or ey >= ny:
+                    continue
+                for ex in (ix - 1, ix):
+                    if ex < 0 or ex >= nx:
+                        continue
+                    if boundary[ex, ey, ez]:
+                        passive[ex + nx * (ey + ny * ez)] = True
+
+
 def _build_boundary_conditions(mesh, node_coords, vsize,
                                 fixed: Sequence,
                                 loads: Sequence):
     """Convert user BC specs into fixed_dofs array and force vector.
 
-    Each element of *fixed* can be:
-      - ``str`` — bookmark ("left", "right", …)
-      - ``dict`` — ``center``, ``normal``, ``radius``, ``angle``, ``fix_x/y/z``
-      - a build123d ``Face``, ``Solid``, or ``trimesh.Trimesh``
-
-    Each element of *loads* can be:
-      - ``str`` — bookmark
-      - ``dict`` — as above plus ``force`` vector
-      - ``(region, force_vector)`` tuple — e.g. ``(face, (0, 0, -10))``
-
-    Returns
-    -------
-    fixed_dofs : (F,) int64
-    force : (ndof,) float64
+    Returns (fixed_dofs, force).  For passive-solid marking, use
+    _compute_passive_solid() separately with the raw specs.
     """
     ndof = 3 * len(node_coords)
     fixed_dofs = []
@@ -146,7 +247,6 @@ def _build_boundary_conditions(mesh, node_coords, vsize,
     BOOKMARKS = _face_bookmarks(mesh.bounds)
 
     def _normalise(spec):
-        """Resolve str bookmarks, return a dict or a non-str object."""
         if isinstance(spec, str):
             d = BOOKMARKS.get(spec)
             if d is None:
@@ -173,7 +273,6 @@ def _build_boundary_conditions(mesh, node_coords, vsize,
                 fixed_dofs.append(3 * nid + 2)
 
     for item in loads:
-        # Support (region, force_vector) tuples
         if isinstance(item, tuple) and len(item) == 2:
             spec, fvec = item
             spec = _normalise(spec)
@@ -261,38 +360,28 @@ def optimize(
     Parameters
     ----------
     build_mesh : trimesh.Trimesh or build123d Shape
-        The design space.  Accepts a ``trimesh.Trimesh``, any build123d
-        ``Solid`` / ``Compound`` / ``Part`` (anything with a
-        ``tessellate()`` method), or a plain ``(vertices, faces)`` tuple.
+        The design space.
     fixed : list of dict or str
-        Where the part is clamped.  Each entry is either a region dict
-        (``center``, ``normal``, ``radius``, ``angle``) or a bookmark
-        string (``"left"``, ``"right"``, ``"front"``, ``"back"``,
-        ``"top"``, ``"bottom"``).  All DOFs at selected nodes are fixed.
-    loads : list of dict or str
-        Where external forces act.  Region dicts also need a ``force``
-        key ``(fx, fy, fz)``.  The total force is spread evenly across
-        all selected nodes.
+        Where the part is clamped.  Bookmarks, dicts, build123d Face/Solid.
+    loads : list of dict, str, or (region, force) tuples.
     exclude : list
-        Keep-out regions; voxels inside these are forced empty.
-        Each item is converted via ``_to_trimesh()`` (trimesh, build123d
-        shape, or ``(verts, faces)`` tuple accepted).
+        Keep-out regions.
     resolution : int
-        Voxels along the longest axis of *build_mesh*.
+        Voxels along the longest axis.
     volfrac : float
         Target volume fraction (0–1).
     max_iter : int
         Maximum SIMP iterations.
     penalty : float
-        SIMP penalty exponent (≥ 1, usually 3).
+        SIMP penalty exponent.
     rmin : float or None
-        Density-filter radius in voxels.  ``None`` picks a sensible default.
+        Density-filter radius in voxels.
     style : str
-        ``"SMOOTH"`` (surface nets) or ``"BLOCKY"`` (voxel faces).
+        ``"SMOOTH"`` or ``"BLOCKY"``.
     iso : float
-        Isovalue for the extracted surface.
+        Isovalue for surface extraction.
     verbose : bool
-        Print progress to stdout.
+        Print progress.
 
     Returns
     -------
@@ -308,7 +397,6 @@ def optimize(
 
     dims, origin, vsize, active = voxelize(build_mesh, resolution)
 
-    # Exclusions
     if exclude:
         for ex in exclude:
             _, _, _, ex_active = voxelize(ex, resolution,
@@ -340,10 +428,17 @@ def optimize(
     fixed_dofs, force = _build_boundary_conditions(
         build_mesh, node_coords, vsize, fixed, loads)
 
+    # ---- passive-solid elements (BC anchors) ----------------------------
+    passive_solid = _compute_passive_solid(
+        nx, ny, nz, active, fixed, loads, build_mesh.bounds)
+
     if verbose:
+        n_passive = passive_solid.sum()
         print(f"  Fixed DOFs: {len(fixed_dofs):,}")
         f_nodes = len(np.where(np.abs(force) > 1e-12)[0]) // 3
         print(f"  Loaded nodes: {f_nodes:,}")
+        if n_passive:
+            print(f"  Passive-solid elements (BC anchors): {n_passive:,}")
 
     # ---- filter radius ---------------------------------------------------
     if rmin is None:
@@ -372,6 +467,7 @@ def optimize(
         use_multigrid=True,
         compute_mode="AUTO",
         verbose=False,
+        passive_solid=passive_solid,
     )
 
     best_rho = None
@@ -392,7 +488,7 @@ def optimize(
         print(f"\n{'='*55}")
         print("Extracting surface ...")
 
-    rho3d = best_rho.reshape(nx, ny, nz)
+    rho3d = best_rho.reshape(nx, ny, nz, order='F')
 
     if style.upper() == "BLOCKY":
         from .core.extract import cubes_from_density

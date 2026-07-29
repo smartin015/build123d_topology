@@ -116,17 +116,41 @@ class Problem:
     def __init__(self, nx, ny, nz, active, fixed_dofs, force,
                  volfrac=0.3, penalty=3.0, rmin=1.5, nu=0.3,
                  e0=1.0, e_min=1e-9, use_multigrid=True,
-                 compute_mode="AUTO", cpu_threads=0, verbose=False):
+                 compute_mode="AUTO", cpu_threads=0, verbose=False,
+                 passive_solid=None):
+        """
+        Parameters
+        ----------
+        passive_solid : bool array (nelem,) or None
+            Elements forced to density 1.0.  They participate in FEA (so
+            boundary conditions stay mechanically connected) but the
+            optimizer never changes their density.  Typically one layer of
+            elements at each fixed support / load face.
+        """
         self.nx, self.ny, self.nz = nx, ny, nz
         self.shape = (nx, ny, nz)
-        self.active = active.astype(bool).ravel()      # voxels free to change
+        self.nelem = nx * ny * nz
         self.volfrac = volfrac
         self.penalty = penalty
         self.e0 = e0
         self.e_min = e_min
 
+        # ---- passive solid (BC anchors) ---------------------------------
+        if passive_solid is not None:
+            self.passive_solid = np.asarray(passive_solid, dtype=bool).ravel()
+        else:
+            self.passive_solid = np.zeros(self.nelem, dtype=bool)
+
+        # Designable elements = active AND not passive-solid.
+        # The FEA system includes both designable and passive-solid elements
+        # so that fixed / loaded nodes remain mechanically connected.
+        self.active = active.astype(bool).ravel()
+        self.fea_active = self.active | self.passive_solid
+        self.design = self.active & ~self.passive_solid
+
         self.fea = VoxelFEA(nx, ny, nz, nu=nu, e_min=e_min,
-                            active_elems=self.active, compute_mode=compute_mode,
+                            active_elems=self.fea_active,
+                            compute_mode=compute_mode,
                             cpu_threads=cpu_threads, verbose=verbose)
         self.fea.set_fixed(fixed_dofs)
         self.force = np.asarray(force, dtype=float)
@@ -169,29 +193,32 @@ class Problem:
         level) used as a warm start. Values outside the active region are
         ignored; the active region is rescaled to hit the volume fraction.
         """
-        active = self.active
-        n_active = int(active.sum())
-        rho = np.zeros(self.nx * self.ny * self.nz)
+        design = self.design
+        n_design = int(design.sum())
+        rho = np.zeros(self.nelem)
+
+        # Passive-solid elements are forced to 1.0
+        if self.passive_solid.any():
+            rho[self.passive_solid] = 1.0
+
         if x_init is not None:
             seed = np.clip(np.asarray(x_init, dtype=float).ravel(), 0.0, 1.0)
-            rho[active] = seed[active]
-            cur = rho[active].sum()
-            target = self.volfrac * n_active
+            rho[design] = seed[design]
+            cur = rho[design].sum()
+            target = self.volfrac * (n_design + self.passive_solid.sum())
+            # Only scale the designable elements; passive ones stay at 1.0
             if cur > 1e-9:
-                rho[active] = np.clip(rho[active] * (target / cur), 0.0, 1.0)
+                rho[design] = np.clip(rho[design] * (target / cur), 0.0, 1.0)
             else:
-                rho[active] = self.volfrac
+                rho[design] = self.volfrac
         else:
-            rho[active] = self.volfrac       # uniform start in active region
+            rho[design] = self.volfrac       # uniform start in design region
 
         p, e0, emin = self.penalty, self.e0, self.e_min
-        u_prev = u_init      # CG warm start (seeded from coarser level)
-        prev_change = 1.0    # drives the adaptive CG tolerance
+        u_prev = u_init      # CG warm start
+        prev_change = 1.0
 
         for it in range(1, max_iter + 1):
-            # Adaptive CG tolerance: loose while the shape is still moving a lot,
-            # tightening as it settles. Early SIMP steps don't need an accurate
-            # displacement, so this saves many CG iterations up front.
             cg_tol = min(2e-3, max(1e-5, 0.1 * prev_change))
             Evec = emin + rho ** p * (e0 - emin)
             if self.mg is not None:
@@ -208,13 +235,13 @@ class Problem:
             ce = self.fea.element_strain_energy(u)        # at unit E
             compliance = float(np.sum(Evec * ce))
             dc = -p * rho ** (p - 1) * (e0 - emin) * ce
-            dc[~active] = 0.0
+            dc[~design] = 0.0
 
             dc = self._filter_sens(rho, dc)
-            dc[~active] = 0.0
+            dc[~design] = 0.0
 
-            rho_new = self._oc_update(rho, dc, active, n_active)
-            change = float(np.max(np.abs(rho_new - rho)[active])) if n_active else 0.0
+            rho_new = self._oc_update(rho, dc, design, n_design)
+            change = float(np.max(np.abs(rho_new - rho)[design])) if n_design else 0.0
             prev_change = change
             rho = rho_new
 
@@ -223,24 +250,29 @@ class Problem:
             if change < tol:
                 break
 
-    def _oc_update(self, rho, dc, active, n_active, move=0.2):
+    def _oc_update(self, rho, dc, design, n_design, move=0.2):
         """Optimality-criteria density update with bisection on the multiplier."""
         l1, l2 = 1e-9, 1e9
-        target_vol = self.volfrac * n_active
-        rho_a = rho[active]
-        dc_a = dc[active]
-        be = np.maximum(-dc_a, 0.0)
-        cand = rho_a
+        # Target volume: passive-solid elements are always at 1.0,
+        # so the design domain must hit the remaining volume budget.
+        passive_vol = float(self.passive_solid.sum())
+        target_vol = self.volfrac * (n_design + passive_vol) - passive_vol
+        if target_vol < 0:
+            target_vol = 0.0  # passive already exceeds target
+        rho_d = rho[design]
+        dc_d = dc[design]
+        be = np.maximum(-dc_d, 0.0)
+        cand = rho_d
         while (l2 - l1) / (l1 + l2) > 1e-4:
             lmid = 0.5 * (l1 + l2)
             step = np.sqrt(be / lmid)
-            cand = np.clip(rho_a * step,
-                           np.maximum(0.0, rho_a - move),
-                           np.minimum(1.0, rho_a + move))
+            cand = np.clip(rho_d * step,
+                           np.maximum(0.0, rho_d - move),
+                           np.minimum(1.0, rho_d + move))
             if cand.sum() > target_vol:
                 l1 = lmid
             else:
                 l2 = lmid
         new = rho.copy()
-        new[active] = cand
+        new[design] = cand
         return new

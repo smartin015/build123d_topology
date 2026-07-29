@@ -28,7 +28,7 @@ class Result:
     def __init__(self, verts, faces, density_flat, dims, origin, vsize):
         self._verts = np.asarray(verts, dtype=np.float64)
         self._faces = np.asarray(faces, dtype=np.int64)
-        self.density = np.asarray(density_flat).reshape(dims)
+        self.density = np.asarray(density_flat).reshape(dims, order='F')
         self.dims = tuple(dims)
         self.origin = np.asarray(origin, dtype=np.float64)
         self.vsize = float(vsize)
